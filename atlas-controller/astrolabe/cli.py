@@ -641,7 +641,7 @@ def run_headless(ctx, spec_tests_directory, workload_executor, db_username,
 
         # Test step-3: start the workload in a subprocess.
         # STDOUT, STDERR of workload is attached to XUNIT output.
-        from time import time
+        from time import time, sleep
         test_start_time = time()
 
         import subprocess
@@ -655,6 +655,7 @@ def run_headless(ctx, spec_tests_directory, workload_executor, db_username,
         from astrolabe.commands import run_maintenance, is_server_state
         # import pdb; pdb.set_trace()
         run_maintenance(ctx.obj, test_case, group.json()['id'])
+        sleep(3)     # must sleep here or it is possible to miss maintenance altogether
         select_callback(
             is_server_state,
             (ctx.obj, group.json()['id'], test_case.cluster_name, "IDLE"),
@@ -707,7 +708,7 @@ def run_headless(ctx, spec_tests_directory, workload_executor, db_username,
         # TODO
         # download logs and delete cluster asynchronously
         #cleanup_queue.put(cluster_name)    # cleanup queue downloads logs and deletes cluster
-        atlas.Clusters(ctx.obj).delete(group.json()["id"], test_case.cluster_name)
+        # atlas.Clusters(ctx.obj).delete(group.json()["id"], test_case.cluster_name)
 
     # Step-7: write the XUNIT file
     xml = junitparser.JUnitXml()

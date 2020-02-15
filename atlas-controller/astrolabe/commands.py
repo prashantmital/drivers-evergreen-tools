@@ -83,6 +83,7 @@ def select_callback(callback, args, kwargs, frequency, timeout):
 def is_server_state(config, group_id, cluster_name, target_state):
     cluster = atlas.Clusters(config).get_one_by_name(group_id, cluster_name).json()
     if cluster["stateName"] == target_state:
+        print("Server is in goal state. Current state: {}".format(cluster["stateName"]))
         return cluster
     else:
         print("Server is not in goal state. Current state: {}".format(cluster["stateName"]))
