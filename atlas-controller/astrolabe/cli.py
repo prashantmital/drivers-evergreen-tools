@@ -9,7 +9,8 @@ import click
 
 from astrolabe.atlas_client import AtlasClient
 from astrolabe.exceptions import AtlasApiError
-import astrolabe.commands as commands
+from astrolabe.planner import SpecTestPlanner
+import astrolabe.runner as commands
 from astrolabe.config import (
     setup_configuration, CONFIG_DEFAULTS as DEFAULTS,
     CONFIG_ENVVARS as ENVVARS)
@@ -358,75 +359,33 @@ def run_headless(ctx, spec_tests_directory, workload_executor, db_username,
         organization.name, organization.id))
 
     # Step-2: check that the project exists or else create one.
-    try:
-        group = client.groups.byName[group_name].get().data
-    except AtlasApiError:
-        # Create the group if it doesn't exist.
-        group = client.groups.post(name=group_name, orgId=organization.id).data
+    group = commands.ensure_project(client, group_name, organization.id)
     click.echo("Using Atlas Project {!r}. ID: {!r}".format(
         group.name, group.id))
 
     # Step-3: create a user under the project and populate the IP whitelist.
     # This user will be used by all tests to run operations.
     # 0.0.0.0 will be added to the IP whitelist enabling "access from anywhere".
-    user_details = {
-        "groupId": group.id,
-        "databaseName": "admin",
-        "roles": [{
-            "databaseName": "admin",
-            "roleName": "atlasAdmin"}],
-        "username": db_username,
-        "password": db_password}
-
-    try:
-        client.groups[group.id].databaseUsers.post(**user_details)
-    except AtlasApiError as exc:
-        if exc.error_code == "USER_ALREADY_EXISTS":
-            # Cannot send username when updating an existing user.
-            username = user_details.pop("username")
-            client.groups[group.id].databaseUsers.admin[username].patch(
-                **user_details)
-        else:
-            raise
+    commands.ensure_admin_user(client, group.id, db_username, db_password)
+    commands.ensure_connect_from_anywhere(client, group.id)
     click.echo("Using Atlas User {!r}".format(db_username))
-
-    ip_details_list = [{"cidrBlock": "0.0.0.0/0"},]
-    # TODO catch ResourceAlreadyExistsError here.
-    client.groups[group.id].whitelist.post(json=ip_details_list)
 
     # Step-4: create a test-plan.
     # The test-plan is a list of tuples. Each tuple contains:
     #   - the unique test name
     #   - the JSON test-definition loaded as a dictionary
     #   - the unique Atlas cluster name (29 characters max)
-    from hashlib import sha256
-    test_plans = []
-    for test_name, test_path in commands.walk_spec_test_directory(
-            spec_tests_directory):
-        with open(test_path, 'r') as fp:
-            test_spec = yaml.load(fp, Loader=yaml.FullLoader)
-
-        name_hash = sha256(cluster_name_salt.encode('utf-8'))
-        name_hash.update(test_name.encode('utf-8'))
-        cluster_name = name_hash.hexdigest()[:10]
-
-        test_plans.append(APMTest(test_name, test_spec, cluster_name))
-
-    from tabulate import tabulate
-    _cases = []
-    for test_case in test_plans:
-        _cases.append([test_case.test_name, test_case.cluster_name])
+    planner = SpecTestPlanner(spec_tests_directory, cluster_name_salt)
+    planner.compute_test_plan()
     click.echo("--------------- Test Plan --------------- ")
-    click.echo(tabulate(
-        _cases, headers=["Test Case Name", "Atlas Cluster Name"],
-        showindex="always"))
+    click.echo(planner.get_printable_test_plan())
 
     # Step-5: initialize all clusters required by the test-plan.
     # Cluster initialization involves the following steps:
     #   - Create cluster with given configuration and name; if a cluster
     #     bearing the desired name already exists, the entire run fails.
     #   - Modify advanced config of cluster to desired initial state
-    for test_case in test_plans:
+    for test_case in planner.test_cases():
         _, spec, cluster_name = test_case
         config = spec["maintenancePlan"]["initial"]["basicConfiguration"].copy()
         config["name"] = cluster_name
@@ -452,7 +411,7 @@ def run_headless(ctx, spec_tests_directory, workload_executor, db_username,
     junit_suite = junitparser.TestSuite('Atlas Planned Maintenance Testing')
 
     while test_plans:
-        from astrolabe.commands import select_callback, get_ready_test_plan
+        from astrolabe.runner import select_callback, get_ready_test_plan
         test_case, cluster = select_callback(
             get_ready_test_plan,
             (ctx.obj, group.json()["id"], test_plans),
@@ -479,7 +438,7 @@ def run_headless(ctx, spec_tests_directory, workload_executor, db_username,
             click.echo("Loaded test data!")
 
         # Test step-2: get cmdline args for workload executor
-        from astrolabe.commands import get_executor_args
+        from astrolabe.runner import get_executor_args
         connection_string, workload_spec = get_executor_args(
             test_case, db_username, db_password, cluster["srvAddress"])
 

@@ -17,17 +17,41 @@ def get_one_organization_by_name(client, org_name):
     raise AtlasApiError('Resource not found.')
 
 
-def create_admin_user(client, username, password, group_name):
-    project = client.groups.byName[group_name].get().data
+def ensure_project(client, group_name, org_id):
+    try:
+        return client.groups.post(name=group_name, orgId=org_id).data
+    except AtlasApiError as exc:
+        if exc.error_code == 'GROUP_ALREADY_EXISTS':
+            return client.groups.byName[group_name].get().data
+        else:
+            raise
+
+
+def ensure_admin_user(client, group_id, username, password):
     user_details = {
-        "groupId": project.id,
+        "groupId": group_id,
         "databaseName": "admin",
         "roles": [{
             "databaseName": "admin",
             "roleName": "atlasAdmin"}],
         "username": username,
         "password": password}
-    return client.groups[project.id].databaseUsers.post(**user_details)
+
+    try:
+        return client.groups[group_id].databaseUsers.post(**user_details)
+    except AtlasApiError as exc:
+        if exc.error_code == "USER_ALREADY_EXISTS":
+            username = user_details.pop("username")
+            client.groups[group_id].databaseUsers.admin[username].patch(
+                **user_details)
+        else:
+            raise
+
+
+def ensure_connect_from_anywhere(client, group_id,):
+    ip_details_list = [{"cidrBlock": "0.0.0.0/0"}]
+    # TODO catch ResourceAlreadyExistsError here.
+    client.groups[group_id].whitelist.post(json=ip_details_list)
 
 
 def get_cluster_state(client, group_name, cluster_name):

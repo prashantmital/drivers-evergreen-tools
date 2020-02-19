@@ -56,7 +56,7 @@ class Timer:
         return self._end - self._start
 
 
-APMTest = namedtuple("APMTest", ["test_name", "spec", "cluster_name"])
+APMTest = namedtuple("APMTest", ["test_name", "cluster_name", "spec"])
 
 
 class JSONObject(dict):
