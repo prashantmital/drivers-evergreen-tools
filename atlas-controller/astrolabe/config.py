@@ -1,19 +1,12 @@
-import logging
+from collections import namedtuple
 
-from http.client import HTTPConnection
+from requests.auth import HTTPDigestAuth
 
 
 # Default CLI option values.
 DEFAULT_ATLAS_ORGANIZATION = "MongoDB"
 DEFAULT_DBUSERNAME = "atlasuser"
 DEFAULT_DBPASSWORD = "mypassword123"
-DEFAULT_STATUSPOLLINGTIMEOUT = 600
-DEFAULT_STATUSPOLLINGFREQUENCY = 1
-
-
-# Default values of configuration options.
-DEFAULT_BASEURL = "https://cloud.mongodb.com/api/atlas/v1.0/"
-DEFAULT_HTTPTIMEOUT = 10
 
 
 # Environment variables used to determine Atlas project and cluster name.
@@ -23,43 +16,29 @@ CLUSTERNAME_ENVVAR = "ATLAS_CLUSTER_NAME"       # user-defined
 CLUSTERNAMESALT_ENVVAR = "EVERGREEN_BUILD_ID"   # use ${build_id} expansion
 
 
-# Application configuration class.
-class AppConfig:
-    # Map of configurable option names and the associated environment variables
-    # that can be used to set them.
-    ENVVARS = {
-        "baseurl"       : "ASTROLABE_API_BASE_URL",
-        "apiusername"   : "ASTROLABE_API_USERNAME",
-        "apipassword"   : "ASTROLABE_API_PASSWORD",
-        "httptimeout"   : "ASTROLABE_HTTP_TIMEOUT"
-    }
+# Convenience class for storing settings related to polling.
+_PollerSettings = namedtuple(
+    "PollerSettings",
+    ["timeout", "frequency"])
 
-    def __init__(self, **kwargs):
-        self.baseurl = DEFAULT_BASEURL
-        self.httptimeout = DEFAULT_HTTPTIMEOUT
-        self.apipassword = None
-        self.apiusername = None
-        self.reconfigure(**kwargs)
 
-    def reconfigure(self, **kwargs):
-        verbose = kwargs.pop("verbose")
-        if verbose:
-            self.enable_http_logging(verbose)
+# Convenience class for storing application configuration.
+_ControllerConfig = namedtuple(
+    "AtlasControllerConfiguration",
+    ["base_url", "api_version", "auth", "timeout", "polling_settings",
+     "verbose"])
 
-        for opt in ("baseurl", "apiusername", "apipassword", "httptimeout"):
-            optval = kwargs.pop(opt)
-            if optval is not None:
-                setattr(self, opt, optval)
 
-    @staticmethod
-    def enable_http_logging(loglevel):
-        # Logging for HTTP Requests and Responses.
-        HTTPConnection.debuglevel = loglevel
-
-        # Python logging levels are 0, 10, 20, 30, 40, 50
-        pyloglevel = loglevel * 10
-        logging.basicConfig()
-        logging.getLogger().setLevel(pyloglevel)
-        requests_log = logging.getLogger("requests.packages.urllib3")
-        requests_log.setLevel(pyloglevel)
-        requests_log.propagate = True
+def setup_configuration(atlas_base_url, atlas_api_version, atlas_api_username,
+                        atlas_api_password, http_timeout, polling_timeout,
+                        polling_frequency, verbose):
+    config = _ControllerConfig(
+        base_url=atlas_base_url,
+        api_version=atlas_api_version,
+        auth=HTTPDigestAuth(username=atlas_api_username,
+                            password=atlas_api_password),
+        timeout=http_timeout,
+        polling_settings=_PollerSettings(timeout=polling_timeout,
+                                         frequency=polling_frequency),
+        verbose=verbose)
+    return config

@@ -4,64 +4,56 @@ from time import sleep, time
 
 from click import echo, Abort
 
-import astrolabe.atlasapi as atlas
 import astrolabe.exceptions
 from astrolabe.exceptions import TestOrchestratorError
 from astrolabe.utils import assert_subset
 
 
-def get_group_by_name_safe(config, group_name):
-    try:
-        group = atlas.Projects(config).get_one_by_name(group_name)
-    except astrolabe.exceptions.ResourceNotFoundError:
-        raise TestOrchestratorError("Project {!r} not found".format(
-            group_name))
-    return group.json()
+from astrolabe.atlasclient import AtlasAPIError, AtlasRateLimitError, AtlasClientError
 
 
-def get_organization_by_name(config, org_name):
-    response = atlas.Organizations(config).list()
-    for org in response.json()['results']:
-        if org['name'] == org_name:
+def get_one_organization_by_name(client, org_name):
+    all_orgs = client.orgs.get().data
+    for org in all_orgs.results:
+        if org.name == org_name:
             return org
-    return None
+    raise AtlasAPIError('Resource not found.')
 
 
-def create_admin_user(config, username, password, group_name):
-    group = atlas.Projects(config).get_one_by_name(group_name).json()
+def create_admin_user(client, username, password, group_name):
+    project = client.groups.byName[group_name].get().data
     user_details = {
+        "groupId": project.id,
         "databaseName": "admin",
         "roles": [{
             "databaseName": "admin",
             "roleName": "atlasAdmin"}],
         "username": username,
         "password": password}
-    return atlas.Users(config).create(
-        group_id=group['id'], user_details=user_details)
+    return client.groups[project.id].databaseUsers.post(**user_details)
 
 
-def get_cluster_state(config, group_name, cluster_name):
-    group = atlas.Projects(config).get_one_by_name(group_name).json()
-    cluster = atlas.Clusters(config).get_one_by_name(group['id'],
-                                                      cluster_name)
-    return cluster.json()["stateName"]
+def get_cluster_state(client, group_name, cluster_name):
+    project = client.groups.byName[group_name].get().data
+    cluster = client.groups[project.id].clusters[cluster_name].get().data
+    return cluster.stateName
 
 
-def is_cluster_state(config, group_name, cluster_name, target_state):
-    current_state = get_cluster_state(config, group_name, cluster_name)
+def is_cluster_state(client, group_name, cluster_name, target_state):
+    current_state = get_cluster_state(client, group_name, cluster_name)
     return current_state == target_state
 
 
-def wait_until_cluster_state(config, group_name, cluster_name, target_state,
+def wait_until_cluster_state(client, group_name, cluster_name, target_state,
                              polling_frequency, polling_timeout):
-    if is_cluster_state(config, group_name, cluster_name,
+    if is_cluster_state(client, group_name, cluster_name,
                         target_state):
         return True
 
     start_time = time()
     sleep_interval = 1 / polling_frequency
     while (time() - start_time) < polling_timeout:
-        if is_cluster_state(config, group_name, cluster_name, target_state):
+        if is_cluster_state(client, group_name, cluster_name, target_state):
             return True
         sleep(sleep_interval)
 
@@ -80,24 +72,15 @@ def select_callback(callback, args, kwargs, frequency, timeout):
     raise RuntimeError      # TODO make new error type for polling timeout
 
 
-def is_server_state(config, group_id, cluster_name, target_state):
-    cluster = atlas.Clusters(config).get_one_by_name(group_id, cluster_name).json()
-    if cluster["stateName"] == target_state:
-        print("Server is in goal state. Current state: {}".format(cluster["stateName"]))
-        return cluster
-    else:
-        print("Server is not in goal state. Current state: {}".format(cluster["stateName"]))
-        return None
-
-
-def get_ready_test_plan(config, group_id, test_plans):
+def get_ready_test_plan(client, group_id, test_plans):
+    clusters = client.groups[group_id].clusters
     for test_case in test_plans:
-        cluster = atlas.Clusters(config).get_one_by_name(
-            group_id, test_case.cluster_name).json()
-        if cluster["stateName"] == "IDLE":
+        cluster_resource = clusters[test_case.cluster_name]
+        cluster = cluster_resource.get().data
+        if cluster.stateName == "IDLE":
             # Verification
             assert_subset(cluster, test_case.spec["maintenancePlan"]["initial"]["basicConfiguration"])
-            processArgs = atlas.Clusters(config).get_process_args(group_id, test_case.cluster_name).json()
+            processArgs = cluster_resource.processArgs.get().data
             assert_subset(processArgs, test_case.spec["maintenancePlan"]["initial"]["processArgs"])
             print("Cluster {} is ready!".format(test_case.cluster_name))
             return test_case, cluster
@@ -119,7 +102,7 @@ def get_executor_args(test_case, username, password, plain_srv_address):
     return srv_address, test_case.spec["driverWorkload"]
 
 
-def run_maintenance(config, test_case, group_id):
+def run_maintenance(client, test_case, group_id):
     final_config = test_case.spec["maintenancePlan"]["final"]
 
     basic_conf = final_config["basicConfiguration"]
@@ -128,11 +111,12 @@ def run_maintenance(config, test_case, group_id):
     if not basic_conf and not process_args:
         raise RuntimeError("invalid maintenance plan - both configs cannot be blank")
 
+    cluster = client.groups[group_id].clusters[test_case.cluster_name]
     if basic_conf:
-        atlas.Clusters(config).modify(group_id, test_case.cluster_name, basic_conf)
+        cluster.patch(**basic_conf)
 
     if process_args:
-        atlas.Clusters(config).modify_process_args(group_id, test_case.cluster_name, process_args)
+        cluster.processArgs.patch(**process_args)
 
     print("Maintenance has been started!")
 

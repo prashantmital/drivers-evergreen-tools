@@ -6,52 +6,16 @@ import click
 from collections import defaultdict
 from pprint import pprint
 
-import astrolabe.atlasapi as atlas
+
+from astrolabe.atlasclient import AtlasClient, AtlasAPIError, AtlasClientError, AtlasRateLimitError
+import astrolabe.commands as commands
 from astrolabe.config import (
-    AppConfig, DEFAULT_ATLAS_ORGANIZATION, DEFAULT_STATUSPOLLINGTIMEOUT,
-    DEFAULT_STATUSPOLLINGFREQUENCY, DEFAULT_DBPASSWORD, DEFAULT_DBUSERNAME,
+    setup_configuration, DEFAULT_ATLAS_ORGANIZATION, DEFAULT_DBPASSWORD, DEFAULT_DBUSERNAME,
     PROJECTNAME_ENVVAR, CLUSTERNAME_ENVVAR, CLUSTERNAMESALT_ENVVAR)
 from astrolabe.exceptions import (
     ResourceAlreadyExistsError, ResourceAlreadyRequestedError,
     ResourceNotFoundError, TestOrchestratorError)
-from astrolabe.utils import APMTestPlan
 
-
-# Infinitely nested defaultdict type.
-def _nested_defaultdict():
-    return defaultdict(_nested_defaultdict)
-
-
-# Utility to merge a list of dictionaries.
-def _merge_dictionaries(dicts):
-    result = {}
-    for d in dicts:
-        result.update(d)
-    return result
-
-
-# Custom Click-type for user-input of Atlas Configurations.
-class _JsonDotNotationType(click.ParamType):
-    def convert(self, value, param, ctx):
-        # Return None and target type without change.
-        if value is None or isinstance(value, dict):
-            return value
-
-        # Parse the input (of type path.to.namespace=value).
-        ns, config_value = value.split("=")
-        ns_path = ns.split(".")
-        return_value = _nested_defaultdict()
-
-        # Construct dictionary from parsed option.
-        pointer = return_value
-        for key in ns_path:
-            if key == ns_path[-1]:
-                pointer[key] = config_value
-            else:
-                pointer = pointer[key]
-
-        # Convert nested defaultdict into vanilla dictionary.
-        return json.loads(json.dumps(return_value))
 
 
 # Define CLI options used in multiple commands for easy re-use.
@@ -75,52 +39,54 @@ ATLASGROUPNAME_OPTION = click.option(
     '--group-name', type=click.STRING, required=True,
     envvar=PROJECTNAME_ENVVAR, help='Name of the Atlas Project.')
 
-CLUSTERSTATUSPOLLINGTIMEOUT_OPTION = click.option(
-    '--polling-timeout', default=DEFAULT_STATUSPOLLINGTIMEOUT,
-    type=click.FLOAT,
-    help='Maximum time (in seconds) to poll cluster state.')
-
-CLUSTERSTATUSPOLLINGFREQUENCY_OPTION = click.option(
-    '--polling-frequency', default=DEFAULT_STATUSPOLLINGFREQUENCY,
-    type=click.FLOAT, help='Frequency (in Hz) of polling cluster state.')
-
 
 @click.group()
+@click.option('--atlas-base-url',
+              envvar="ATLAS_API_BASE_URL",
+              default="https://cloud.mongodb.com/api/atlas",
+              type=click.STRING, help='Base URL of the Atlas API.')
+@click.option('--atlas-api-version',
+              envvar="ATLAS_API_VERSION", default=1.0,
+              type=click.types.FLOAT, help="Version of the Atlas API.")
+@click.option('-u', '--atlas-api-username', required=True,
+              envvar="ATLAS_API_USERNAME",
+              type=click.STRING, help='HTTP-Digest username.')
+@click.option('-p', '--atlas-api-password', required=True,
+              envvar="ATLAS_API_PASSWORD",
+              type=click.STRING, help='HTTP-Digest password.')
+@click.option('--http-timeout', type=click.FLOAT,
+              envvar="ATLAS_HTTP_TIMEOUT", default=10,
+              help='Time (in s) after which HTTP requests should timeout.')
+@click.option('--polling-timeout', type=click.FLOAT,
+              envvar="ATLAS_POLLING_TIMEOUT", default=600.0,
+              help="Maximum time (in s) to poll API endpoints.")
+@click.option('--polling-frequency', type=click.FLOAT,
+              envvar="ATLAS_POLLING_FREQUENCY", default=1.0,
+              help='Frequency (in Hz) at which to poll API endpoints.')
+@click.option('-v', '--verbose', count=True, default=False,
+              help="Set the logging level. Default: off.")
 @click.version_option()
-@click.option('--api-base-url', envvar=AppConfig.ENVVARS["baseurl"],
-              type=click.STRING, help='Base URL for the MongoDB Atlas API.')
-@click.option('-u', '--api-username', required=True,
-              envvar=AppConfig.ENVVARS['apiusername'], type=click.STRING,
-              help='HTTP Digest username for authenticating Atlas API access.')
-@click.option('-p', '--api-password', required=True,
-              envvar=AppConfig.ENVVARS['apipassword'], type=click.STRING,
-              help='HTTP Digest password for authenticating Atlas API access.')
-@click.option('--http-timeout', envvar=AppConfig.ENVVARS['httptimeout'],
-              type=click.INT,
-              help='Timeout for HTTP requests to the Atlas API.')
-@click.option('-v', '--verbose', count=True, help="Enable HTTP logging.")
 @click.pass_context
-def cli(ctx, api_base_url, api_username, api_password, http_timeout,
+def cli(ctx, atlas_base_url, atlas_api_version, atlas_api_username,
+        atlas_api_password, http_timeout, polling_timeout, polling_frequency,
         verbose):
     """
     Astrolabe is a command-line application for running automated driver
     tests against a MongoDB Atlas cluster undergoing maintenance.
     """
-    config = AppConfig(
-        baseurl=api_base_url,
-        apiusername=api_username,
-        apipassword=api_password,
-        httptimeout=http_timeout,
-        verbose=verbose)
-    ctx.obj = config
+    config = setup_configuration(
+        atlas_base_url, atlas_api_version, atlas_api_username,
+        atlas_api_password, http_timeout, polling_timeout, polling_frequency,
+        verbose)
+    client = AtlasClient(config)
+    ctx.obj = client
 
 
 @cli.command()
 @click.pass_context
 def check_connection(ctx):
     """Command to verify validity of Atlas API credentials."""
-    response = atlas.Root(ctx.obj).ping()
-    pprint(response.json())
+    pprint(ctx.obj.root.get().data)
 
 #
 # @cli.command()
@@ -139,20 +105,16 @@ def atlas_organizations():
 @click.pass_context
 def list_all_organizations(ctx):
     """List all Atlas Organizations (limited to first 100)."""
-    response = atlas.Organizations(ctx.obj).list()
-    pprint(response.json())
+    pprint(ctx.obj.orgs.get().data)
 
 
 @atlas_organizations.command('get-one')
 @ATLASORGANIZATIONNAME_OPTION
 @click.pass_context
 def get_one_organization_by_name(ctx, org_name):
-    """Get one Atlas Organization."""
-    try:
-        pprint(atlas.Organizations(ctx.obj).get_one_by_name(org_name))
-    except ResourceNotFoundError:
-        raise TestOrchestratorError("Organization {!r} not found".format(
-            org_name))
+    """Get one Atlas Organization by name. Prints "None" if no organization
+    bearing the given name exists."""
+    pprint(commands.get_one_organization_by_name(ctx.obj, org_name))
 
 
 @cli.group('projects')
@@ -167,28 +129,16 @@ def atlas_projects():
 @click.pass_context
 def create_project(ctx, org_name, group_name,):
     """Create a new Atlas Project."""
-    try:
-        org = atlas.Organizations(ctx.obj).get_one_by_name(org_name)
-    except ResourceNotFoundError:
-        raise TestOrchestratorError("Organization {!r} not found".format(
-            org_name))
-
-    try:
-        response = atlas.Projects(ctx.obj).create(
-            group_name=group_name, org_id=org['id'])
-    except ResourceAlreadyExistsError:
-        raise TestOrchestratorError("Project {!r} already exists".format(
-            group_name))
-
-    pprint(response.json())
+    org = commands.get_one_organization_by_name(ctx.obj, org_name)
+    response = ctx.obj.groups.post(name=group_name, orgId=org.id)
+    pprint(response.data)
 
 
 @atlas_projects.command('list')
 @click.pass_context
 def list_projects(ctx):
     """List all Atlas Projects (limited to first 100)."""
-    response = atlas.Projects(ctx.obj).list()
-    pprint(response.json())
+    pprint(ctx.obj.groups.get().data)
 
 
 @atlas_projects.command('get-one')
@@ -196,13 +146,7 @@ def list_projects(ctx):
 @click.pass_context
 def get_one_project_by_name(ctx, group_name):
     """Get one Atlas Project."""
-    try:
-        response = atlas.Projects(ctx.obj).get_one_by_name(group_name)
-    except ResourceNotFoundError:
-        raise TestOrchestratorError("Project {!r} not found".format(
-            group_name))
-
-    pprint(response.json())
+    pprint(ctx.obj.groups.byName[group_name].get().data)
 
 
 @cli.group('users')
@@ -218,28 +162,9 @@ def atlas_users():
 @click.pass_context
 def create_user(ctx, db_username, db_password, group_name):
     """Create an Atlas User with admin privileges."""
-    try:
-        group = atlas.Projects(ctx.obj).get_one_by_name(group_name)
-    except ResourceNotFoundError:
-        raise TestOrchestratorError("Project {!r} not found".format(
-            group_name))
-
-    user_details = {
-        "groupId": group.json()["id"],
-        "databaseName": "admin",
-        "roles": [{
-            "databaseName": "admin",
-            "roleName": "atlasAdmin"}],
-        "username": db_username,
-        "password": db_password}
-
-    try:
-        user = atlas.Users(ctx.obj).create(user_details)
-    except ResourceAlreadyExistsError:
-        raise TestOrchestratorError("User {!r} already exists".format(
-            db_username))
-
-    pprint(user.json())
+    user = commands.create_admin_user(
+        ctx.obj, db_username, db_password, group_name)
+    pprint(user.data)
 
 
 @atlas_users.command('list')
@@ -247,14 +172,8 @@ def create_user(ctx, db_username, db_password, group_name):
 @click.pass_context
 def list_users(ctx, group_name):
     """List all Atlas Users."""
-    try:
-        group = atlas.Projects(ctx.obj).get_one_by_name(group_name)
-    except ResourceNotFoundError:
-        raise TestOrchestratorError("Project {!r} not found".format(
-            group_name))
-
-    users = atlas.Users(ctx.obj).list(group.json()['id'])
-    pprint(users.json())
+    project = ctx.obj.groups.byName[group_name].get().data
+    pprint(ctx.obj.groups[project.id].databaseUsers.get().data)
 
 
 @cli.group('clusters')
@@ -272,11 +191,7 @@ def atlas_clusters():
 @click.pass_context
 def create_cluster(ctx, group_name, cluster_name, instance_size_name):
     """Create a new dedicated-tier Atlas Cluster."""
-    try:
-        group = atlas.Projects(ctx.obj).get_one_by_name(group_name)
-    except ResourceNotFoundError:
-        raise TestOrchestratorError("Project {!r} not found".format(
-            group_name))
+    project = ctx.obj.groups.byName[group_name].get().data
 
     cluster_config = {
         'name': cluster_name,
@@ -286,15 +201,8 @@ def create_cluster(ctx, group_name, cluster_name, instance_size_name):
             'regionName': 'US_WEST_1',
             'instanceSizeName': instance_size_name}}
 
-    try:
-        cluster = atlas.Clusters(ctx.obj).create(
-            group.json()['id'], cluster_config)
-    except ResourceAlreadyExistsError:
-        raise TestOrchestratorError(
-            "Cluster {!r} already exists. Use resize/modify to "
-            "reconfigure it.".format(cluster_name))
-
-    pprint(cluster.json())
+    cluster = ctx.obj.groups[project.id].clusters.post(**cluster_config)
+    pprint(cluster.data)
 
 
 @atlas_clusters.command('get-one')
@@ -303,20 +211,9 @@ def create_cluster(ctx, group_name, cluster_name, instance_size_name):
 @click.pass_context
 def get_one_cluster_by_name(ctx, cluster_name, group_name):
     """Get one Atlas Cluster."""
-    try:
-        group = atlas.Projects(ctx.obj).get_one_by_name(group_name)
-    except ResourceNotFoundError:
-        raise TestOrchestratorError("Project {!r} not found".format(
-            group_name))
-
-    try:
-        cluster = atlas.Clusters(ctx.obj).get_one_by_name(
-            group.json()['id'], cluster_name)
-    except ResourceNotFoundError:
-        raise TestOrchestratorError("Cluster {!r} not found.".format(
-            cluster_name))
-
-    pprint(cluster.json())
+    project = ctx.obj.groups.byName[group_name].get().data
+    cluster = ctx.obj.groups[project.id].clusters[cluster_name].get()
+    pprint(cluster.data)
 
 
 @atlas_clusters.command('resize-dedicated')
@@ -328,11 +225,7 @@ def get_one_cluster_by_name(ctx, cluster_name, group_name):
 @click.pass_context
 def resize_cluster(ctx, group_name, cluster_name, instance_size_name):
     """Resize an existing dedicated-tier Atlas Cluster."""
-    try:
-        group = atlas.Projects(ctx.obj).get_one_by_name(group_name)
-    except ResourceNotFoundError:
-        raise TestOrchestratorError("Project {!r} not found".format(
-            group_name))
+    project = ctx.obj.groups.byName[group_name].get().data
 
     new_cluster_config = {
         'clusterType': 'REPLICASET',
@@ -341,14 +234,9 @@ def resize_cluster(ctx, group_name, cluster_name, instance_size_name):
             'regionName': 'US_WEST_1',
             'instanceSizeName': instance_size_name}}
 
-    try:
-        cluster = atlas.Clusters(ctx.obj).modify(
-            group.json()['id'], cluster_name, new_cluster_config)
-    except ResourceNotFoundError:
-        raise TestOrchestratorError("Cluster {!r} not found.".format(
-            cluster_name))
-
-    pprint(cluster.json())
+    cluster = ctx.obj.groups[project.id].clusters[cluster_name].patch(
+        **new_cluster_config)
+    pprint(cluster.data)
 
 
 @atlas_clusters.command('toggle-js')
@@ -357,26 +245,16 @@ def resize_cluster(ctx, group_name, cluster_name, instance_size_name):
 @click.pass_context
 def toggle_cluster_javascript(ctx, group_name, cluster_name):
     """Enable/disable server-side javascript for an existing Atlas Cluster."""
-    try:
-        group = atlas.Projects(ctx.obj).get_one_by_name(group_name)
-    except ResourceNotFoundError:
-        raise TestOrchestratorError("Project {!r} not found".format(
-            group_name))
+    project = ctx.obj.groups.byName[group_name].get().data
 
-    try:
-        initial_process_args = atlas.Clusters(ctx.obj).get_process_args(
-            group.json()["id"], cluster_name)
-    except ResourceNotFoundError:
-        raise TestOrchestratorError("Cluster {!r} not found.".format(
-            cluster_name))
+    # Alias to reduce verbosity.
+    pargs = ctx.obj.groups[project.id].clusters[cluster_name].processArgs
 
-    target_js_value = not initial_process_args.json()['javascriptEnabled']
+    initial_process_args = pargs.get()
+    target_js_value = not initial_process_args.data.javascriptEnabled
 
-    final_process_args = atlas.Clusters(ctx.obj).modify_process_args(
-        group.json()["id"], cluster_name,
-        {"javascriptEnabled": target_js_value})
-
-    pprint(final_process_args.json())
+    cluster = pargs.patch(javascriptEnabled=target_js_value)
+    pprint(cluster.data)
 
 
 @atlas_clusters.command('list')
@@ -384,14 +262,9 @@ def toggle_cluster_javascript(ctx, group_name, cluster_name):
 @click.pass_context
 def list_clusters(ctx, group_name):
     """List all Atlas Clusters."""
-    try:
-        group = atlas.Projects(ctx.obj).get_one_by_name(group_name)
-    except ResourceNotFoundError:
-        raise TestOrchestratorError("Project {!r} not found".format(
-            group_name))
-
-    clusters = atlas.Clusters(ctx.obj).list(group.json()['id'])
-    pprint(clusters.json())
+    project = ctx.obj.groups.byName[group_name].get().data
+    clusters = ctx.obj.groups[project.id].clusters.get()
+    pprint(clusters.data)
 
 
 @atlas_clusters.command('isready')
@@ -400,20 +273,8 @@ def list_clusters(ctx, group_name):
 @click.pass_context
 def isready_cluster(ctx, group_name, cluster_name):
     """Check if the Atlas Cluster is 'IDLE'."""
-    try:
-        group = atlas.Projects(ctx.obj).get_one_by_name(group_name)
-    except ResourceNotFoundError:
-        raise TestOrchestratorError("Project {!r} not found".format(
-            group_name))
-
-    try:
-        cluster = atlas.Clusters(ctx.obj).get_one_by_name(
-            group.json()['id'], cluster_name)
-    except ResourceNotFoundError:
-        raise TestOrchestratorError("Cluster {!r} not found.".format(
-            cluster_name))
-
-    isready = cluster.json()["stateName"] == "IDLE"
+    isready = commands.is_cluster_state(
+        ctx.obj, group_name, cluster_name, "IDLE")
 
     if isready:
         print("True")
@@ -428,20 +289,8 @@ def isready_cluster(ctx, group_name, cluster_name):
 @click.pass_context
 def delete_cluster(ctx, group_name, cluster_name):
     """Delete the Atlas Cluster."""
-    try:
-        group = atlas.Projects(ctx.obj).get_one_by_name(group_name)
-    except ResourceNotFoundError:
-        raise TestOrchestratorError("Project {!r} not found".format(
-            group_name))
-
-    try:
-        atlas.Clusters(ctx.obj).delete(group.json()['id'], cluster_name)
-    except ResourceNotFoundError:
-        raise TestOrchestratorError("Cluster {!r} not found.".format(
-            cluster_name))
-    except ResourceAlreadyRequestedError:
-        pass
-
+    project = ctx.obj.groups.byName[group_name].get().data
+    ctx.obj.groups[project.id].clusters[cluster_name].delete().data
     print("DONE!")
 
 
@@ -473,8 +322,6 @@ def spec_tests():
               type=click.Path(resolve_path=True))
 @DBUSERNAME_OPTION
 @DBPASSWORD_OPTION
-@CLUSTERSTATUSPOLLINGTIMEOUT_OPTION
-@CLUSTERSTATUSPOLLINGFREQUENCY_OPTION
 @click.pass_context
 def run_one_test(ctx, spec_tests_directory, workload_executor, db_username,
                  db_password, polling_timeout, polling_frequency):
@@ -494,8 +341,6 @@ def run_one_test(ctx, spec_tests_directory, workload_executor, db_username,
 @click.option('--cluster-name-salt', type=click.STRING, required=True,
               envvar=CLUSTERNAMESALT_ENVVAR,
               help='Salt used to generate almost-unique Cluster names.')
-@CLUSTERSTATUSPOLLINGTIMEOUT_OPTION
-@CLUSTERSTATUSPOLLINGFREQUENCY_OPTION
 @click.pass_context
 def run_headless(ctx, spec_tests_directory, workload_executor, db_username,
                  db_password, org_name, group_name, cluster_name_salt,
@@ -505,32 +350,29 @@ def run_headless(ctx, spec_tests_directory, workload_executor, db_username,
     This command runs all tests found in the SPEC_TESTS_DIRECTORY
     sequentially on an Atlas cluster.
     """
+    # Alias for simplicity.
+    client = ctx.obj
+
     # Step-1: ensure validity of provided Atlas Organization.
     # Organizations can only be created by users manually via the web UI.
-    try:
-        organization = atlas.Organizations(ctx.obj).get_one_by_name(org_name)
-    except ResourceNotFoundError:
-        raise TestOrchestratorError("Organization {!r} not found".format(
-            org_name))
-    else:
-        click.echo("Using Atlas Organization {!r}. ID: {!r}".format(
-            organization["name"], organization["id"]))
+    organization = commands.get_one_organization_by_name(client, org_name)
+    click.echo("Using Atlas Organization {!r}. ID: {!r}".format(
+        organization.name, organization.id))
 
     # Step-2: check that the project exists or else create one.
     try:
-        group = atlas.Projects(ctx.obj).get_one_by_name(group_name)
-    except ResourceNotFoundError:
-        group = atlas.Projects(ctx.obj).create(
-            group_name=group_name, org_id=organization['id'])
-    finally:
-        click.echo("Using Atlas Project {!r}. ID: {!r}".format(
-            group.json()["name"], group.json()["id"]))
+        group = client.groups.byName[group_name].get().data
+    except AtlasAPIError:
+        # Create the group if it doesn't exist.
+        group = client.groups.post(name=group_name, orgId=organization.id).data
+    click.echo("Using Atlas Project {!r}. ID: {!r}".format(
+        group.name, group.id))
 
     # Step-3: create a user under the project and populate the IP whitelist.
     # This user will be used by all tests to run operations.
     # 0.0.0.0 will be added to the IP whitelist enabling "access from anywhere".
     user_details = {
-        "groupId": group.json()["id"],
+        "groupId": group.id,
         "databaseName": "admin",
         "roles": [{
             "databaseName": "admin",
@@ -539,17 +381,20 @@ def run_headless(ctx, spec_tests_directory, workload_executor, db_username,
         "password": db_password}
 
     try:
-        atlas.Users(ctx.obj).create(user_details)
-    except ResourceAlreadyExistsError:
-        # Cannot send username when updating an existing user.
-        username = user_details.pop("username")
-        atlas.Users(ctx.obj).update(username, user_details)
-    finally:
-        click.echo("Using Atlas User {!r}".format(username))
+        client.groups[group.id].databaseUsers.post(**user_details)
+    except AtlasAPIError as exc:
+        if exc.error_code == "USER_ALREADY_EXISTS":
+            # Cannot send username when updating an existing user.
+            username = user_details.pop("username")
+            client.groups[group.id].databaseUsers.admin[username].patch(
+                **user_details)
+        else:
+            raise
+    click.echo("Using Atlas User {!r}".format(username))
 
     ip_details_list = [{"cidrBlock": "0.0.0.0/0"},]
     # TODO catch ResourceAlreadyExistsError here.
-    atlas.IPWhitelist(ctx.obj).add(group.json()["id"], ip_details_list)
+    client.groups[group.id].whitelist.post(raw_body_params=ip_details_list)
 
     # Step-4: create a test-plan.
     # The test-plan is a list of tuples. Each tuple contains:
@@ -590,15 +435,17 @@ def run_headless(ctx, spec_tests_directory, workload_executor, db_username,
         config["name"] = cluster_name
 
         try:
-            atlas.Clusters(ctx.obj).create(group.json()["id"], config)
-        except ResourceAlreadyExistsError:
-            cluster_name = config.pop("name")
-            atlas.Clusters(ctx.obj).modify(group.json()['id'], cluster_name, config)
+            client.groups[group.id].clusters.post(**config)
+        except AtlasAPIError as exc:
+            if exc.error_code == 'DUPLICATE_CLUSTER_NAME':
+                # Cannot send cluster name when updating existing cluster.
+                cluster_name = config.pop("name")
+                client.groups[group.id].clusters[cluster_name].patch(**config)
 
         process_args = spec["maintenancePlan"]["initial"]["processArgs"]
         if process_args:
-            atlas.Clusters(ctx.obj).modify_process_args(
-                group.json()["id"], cluster_name, process_args)
+            client.groups[group.id].clusters[cluster_name].processArgs.patch(
+                **process_args)
 
     # Step-6: while there are remaining tests to be run,
     #         wait until one of the corresponding clusters is ready.
@@ -652,12 +499,12 @@ def run_headless(ctx, spec_tests_directory, workload_executor, db_username,
 
         # Test step-4: kick-off the maintenance routine using the API
         # This call blocks until maintenance is complete.
-        from astrolabe.commands import run_maintenance, is_server_state
+        from astrolabe.commands import run_maintenance
         # import pdb; pdb.set_trace()
         run_maintenance(ctx.obj, test_case, group.json()['id'])
         sleep(3)     # must sleep here or it is possible to miss maintenance altogether
         select_callback(
-            is_server_state,
+            commands.is_cluster_state,
             (ctx.obj, group.json()['id'], test_case.cluster_name, "IDLE"),
             {},
             polling_frequency,
