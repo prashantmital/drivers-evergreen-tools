@@ -1,6 +1,7 @@
 import click
 import json
 import logging
+from time import monotonic
 
 from http.client import HTTPConnection
 from collections import defaultdict, namedtuple
@@ -32,10 +33,34 @@ def assert_subset(dict1, dict2):
             assert dict1[key] == value
 
 
+class Timer:
+    """Class to simplify timing operations."""
+    def __init__(self):
+        self._start = None
+        self._end = None
+
+    def reset(self):
+        self.__init__()
+
+    def start(self):
+        self._start = monotonic()
+        self._end = None
+
+    def stop(self):
+        self._end = monotonic()
+
+    @property
+    def elapsed(self):
+        if self._end is None:
+            return monotonic() - self._start
+        return self._end - self._start
+
+
 APMTest = namedtuple("APMTest", ["test_name", "spec", "cluster_name"])
 
 
 class JSONObject(dict):
+    """Dictonary with dot-notation read access."""
     def __getattr__(self, name):
         if name in self:
             return self[name]
@@ -43,21 +68,22 @@ class JSONObject(dict):
             self.__class__.__name__, name))
 
 
-# Infinitely nested defaultdict type.
 def _nested_defaultdict():
+    """An infinitely nested defaultdict type."""
     return defaultdict(_nested_defaultdict)
 
 
-# Utility to merge a list of dictionaries.
 def _merge_dictionaries(dicts):
+    """Utility method to merge a list of dictionaries.
+    Last observed value prevails."""
     result = {}
     for d in dicts:
         result.update(d)
     return result
 
 
-# Custom Click-type for user-input of Atlas Configurations.
 class _JsonDotNotationType(click.ParamType):
+    """Custom Click-type for user-friendly JSON input."""
     def convert(self, value, param, ctx):
         # Return None and target type without change.
         if value is None or isinstance(value, dict):

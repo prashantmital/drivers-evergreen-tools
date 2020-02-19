@@ -1,6 +1,8 @@
 from pprint import pprint
 import json
+import subprocess
 import sys
+from time import sleep
 import yaml
 
 import click
@@ -11,6 +13,7 @@ import astrolabe.commands as commands
 from astrolabe.config import (
     setup_configuration, CONFIG_DEFAULTS as DEFAULTS,
     CONFIG_ENVVARS as ENVVARS)
+from astrolabe.utils import APMTest, Timer
 
 
 # Define CLI options used in multiple commands for easy re-use.
@@ -385,22 +388,21 @@ def run_headless(ctx, spec_tests_directory, workload_executor, db_username,
                 **user_details)
         else:
             raise
-    click.echo("Using Atlas User {!r}".format(username))
+    click.echo("Using Atlas User {!r}".format(db_username))
 
     ip_details_list = [{"cidrBlock": "0.0.0.0/0"},]
     # TODO catch ResourceAlreadyExistsError here.
-    client.groups[group.id].whitelist.post(raw_body_params=ip_details_list)
+    client.groups[group.id].whitelist.post(json=ip_details_list)
 
     # Step-4: create a test-plan.
     # The test-plan is a list of tuples. Each tuple contains:
     #   - the unique test name
     #   - the JSON test-definition loaded as a dictionary
     #   - the unique Atlas cluster name (29 characters max)
-    from astrolabe.commands import walk_spec_test_directory
-    from astrolabe.utils import APMTest
     from hashlib import sha256
     test_plans = []
-    for test_name, test_path in walk_spec_test_directory(spec_tests_directory):
+    for test_name, test_path in commands.walk_spec_test_directory(
+            spec_tests_directory):
         with open(test_path, 'r') as fp:
             test_spec = yaml.load(fp, Loader=yaml.FullLoader)
 
@@ -483,10 +485,8 @@ def run_headless(ctx, spec_tests_directory, workload_executor, db_username,
 
         # Test step-3: start the workload in a subprocess.
         # STDOUT, STDERR of workload is attached to XUNIT output.
-        from time import time, sleep
-        test_start_time = time()
+        test_timer = Timer()
 
-        import subprocess
         worker_subprocess = subprocess.Popen(
             [sys.executable, workload_executor, connection_string, json.dumps(workload_spec)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -494,9 +494,7 @@ def run_headless(ctx, spec_tests_directory, workload_executor, db_username,
 
         # Test step-4: kick-off the maintenance routine using the API
         # This call blocks until maintenance is complete.
-        from astrolabe.commands import run_maintenance
-        # import pdb; pdb.set_trace()
-        run_maintenance(ctx.obj, test_case, group.json()['id'])
+        commands.run_maintenance(ctx.obj, test_case, group.json()['id'])
         sleep(3)     # must sleep here or it is possible to miss maintenance altogether
         select_callback(
             commands.is_cluster_state,
@@ -518,14 +516,14 @@ def run_headless(ctx, spec_tests_directory, workload_executor, db_username,
         print("---------")
         print(stderr)
 
-        test_end_time = time()
+        test_timer.stop()
 
         # Do more stuff:
         # - parse stderr as JSON
         # - write to XUNIT output using junitparser
         # - set is_failure to True if worker_subprocess.returncode is nonzero
-        junit_test = junitparser.TestCase(test_name)
-        junit_test.time = test_end_time - test_start_time
+        junit_test = junitparser.TestCase(test_case.test_name)
+        junit_test.time = test_timer.elapsed
 
         if worker_subprocess.returncode != 0:
             is_failure = True
@@ -549,7 +547,7 @@ def run_headless(ctx, spec_tests_directory, workload_executor, db_username,
 
         # TODO
         # download logs and delete cluster asynchronously
-        #cleanup_queue.put(cluster_name)    # cleanup queue downloads logs and deletes cluster
+        # cleanup_queue.put(cluster_name)    # cleanup queue downloads logs and deletes cluster
         # atlas.Clusters(ctx.obj).delete(group.json()["id"], test_case.cluster_name)
 
     # Step-7: write the XUNIT file

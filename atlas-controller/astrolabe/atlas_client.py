@@ -86,9 +86,9 @@ class AtlasClient:
             if param_name in params:
                 query_params[param_name] = params.pop(param_name)
 
-        raw_body_params = params.pop('raw_body_params')
-        if raw_body_params:
-            params = raw_body_params
+        raw_json = params.pop('json')
+        if raw_json:
+            params = raw_json
 
         request_kwargs = {
             'auth': self.config.auth,
