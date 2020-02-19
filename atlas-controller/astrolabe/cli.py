@@ -1,43 +1,38 @@
+from pprint import pprint
 import json
 import sys
 import yaml
 
 import click
-from collections import defaultdict
-from pprint import pprint
 
-
-from astrolabe.atlasclient import AtlasClient, AtlasAPIError, AtlasClientError, AtlasRateLimitError
+from astrolabe.atlas_client import AtlasClient
+from astrolabe.exceptions import AtlasApiError
 import astrolabe.commands as commands
 from astrolabe.config import (
-    setup_configuration, DEFAULT_ATLAS_ORGANIZATION, DEFAULT_DBPASSWORD, DEFAULT_DBUSERNAME,
-    PROJECTNAME_ENVVAR, CLUSTERNAME_ENVVAR, CLUSTERNAMESALT_ENVVAR)
-from astrolabe.exceptions import (
-    ResourceAlreadyExistsError, ResourceAlreadyRequestedError,
-    ResourceNotFoundError, TestOrchestratorError)
-
+    setup_configuration, CONFIG_DEFAULTS as DEFAULTS,
+    CONFIG_ENVVARS as ENVVARS)
 
 
 # Define CLI options used in multiple commands for easy re-use.
 DBUSERNAME_OPTION = click.option(
-    '--db-username', type=click.STRING, default=DEFAULT_DBUSERNAME,
+    '--db-username', type=click.STRING, default=DEFAULTS.DB_USERNAME,
     help='Database username on the MongoDB instance.')
 
 DBPASSWORD_OPTION = click.option(
-    '--db-password', type=click.STRING, default=DEFAULT_DBPASSWORD,
+    '--db-password', type=click.STRING, default=DEFAULTS.DB_PASSWORD,
     help='Database password on the MongoDB instance.')
 
 ATLASORGANIZATIONNAME_OPTION = click.option(
-    '--org-name', type=click.STRING, required=True,
-    default=DEFAULT_ATLAS_ORGANIZATION, help='Name of the Atlas Organization.')
+    '--org-name', type=click.STRING, default=DEFAULTS.ATLAS_ORGANIZATION,
+    required=True, help='Name of the Atlas Organization.')
 
 ATLASCLUSTERNAME_OPTION = click.option(
     '--cluster-name', required=True, type=click.STRING,
-    envvar=CLUSTERNAME_ENVVAR, help='Name of the Atlas Cluster.')
+    help='Name of the Atlas Cluster.')
 
 ATLASGROUPNAME_OPTION = click.option(
-    '--group-name', type=click.STRING, required=True,
-    envvar=PROJECTNAME_ENVVAR, help='Name of the Atlas Project.')
+    '--group-name', required=True, type=click.STRING,
+    envvar=ENVVARS.PROJECT_NAME, help='Name of the Atlas Project.')
 
 
 @click.group()
@@ -339,8 +334,8 @@ def run_one_test(ctx, spec_tests_directory, workload_executor, db_username,
 @ATLASORGANIZATIONNAME_OPTION
 @ATLASGROUPNAME_OPTION
 @click.option('--cluster-name-salt', type=click.STRING, required=True,
-              envvar=CLUSTERNAMESALT_ENVVAR,
-              help='Salt used to generate almost-unique Cluster names.')
+              envvar=ENVVARS.CLUSTER_NAME_SALT,
+              help='Salt used to generate unique Cluster names.')
 @click.pass_context
 def run_headless(ctx, spec_tests_directory, workload_executor, db_username,
                  db_password, org_name, group_name, cluster_name_salt,
@@ -362,7 +357,7 @@ def run_headless(ctx, spec_tests_directory, workload_executor, db_username,
     # Step-2: check that the project exists or else create one.
     try:
         group = client.groups.byName[group_name].get().data
-    except AtlasAPIError:
+    except AtlasApiError:
         # Create the group if it doesn't exist.
         group = client.groups.post(name=group_name, orgId=organization.id).data
     click.echo("Using Atlas Project {!r}. ID: {!r}".format(
@@ -382,7 +377,7 @@ def run_headless(ctx, spec_tests_directory, workload_executor, db_username,
 
     try:
         client.groups[group.id].databaseUsers.post(**user_details)
-    except AtlasAPIError as exc:
+    except AtlasApiError as exc:
         if exc.error_code == "USER_ALREADY_EXISTS":
             # Cannot send username when updating an existing user.
             username = user_details.pop("username")
@@ -436,7 +431,7 @@ def run_headless(ctx, spec_tests_directory, workload_executor, db_username,
 
         try:
             client.groups[group.id].clusters.post(**config)
-        except AtlasAPIError as exc:
+        except AtlasApiError as exc:
             if exc.error_code == 'DUPLICATE_CLUSTER_NAME':
                 # Cannot send cluster name when updating existing cluster.
                 cluster_name = config.pop("name")

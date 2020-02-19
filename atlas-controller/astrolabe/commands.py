@@ -5,11 +5,8 @@ from time import sleep, time
 from click import echo, Abort
 
 import astrolabe.exceptions
-from astrolabe.exceptions import TestOrchestratorError
+from astrolabe.exceptions import TestOrchestratorError, AtlasClientError, AtlasApiError, AtlasRateLimitError
 from astrolabe.utils import assert_subset
-
-
-from astrolabe.atlasclient import AtlasAPIError, AtlasRateLimitError, AtlasClientError
 
 
 def get_one_organization_by_name(client, org_name):
@@ -17,7 +14,7 @@ def get_one_organization_by_name(client, org_name):
     for org in all_orgs.results:
         if org.name == org_name:
             return org
-    raise AtlasAPIError('Resource not found.')
+    raise AtlasApiError('Resource not found.')
 
 
 def create_admin_user(client, username, password, group_name):

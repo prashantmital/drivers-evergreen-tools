@@ -1,19 +1,28 @@
 from collections import namedtuple
+from enum import Enum
 
 from requests.auth import HTTPDigestAuth
 
-
-# Default CLI option values.
-DEFAULT_ATLAS_ORGANIZATION = "MongoDB"
-DEFAULT_DBUSERNAME = "atlasuser"
-DEFAULT_DBPASSWORD = "mypassword123"
+from astrolabe.utils import JSONObject
 
 
-# Environment variables used to determine Atlas project and cluster name.
-# Value are set at runtime using Evergreen's default expansions.
-PROJECTNAME_ENVVAR = "EVERGREEN_PROJECT_ID"     # use ${project} expansion
-CLUSTERNAME_ENVVAR = "ATLAS_CLUSTER_NAME"       # user-defined
-CLUSTERNAMESALT_ENVVAR = "EVERGREEN_BUILD_ID"   # use ${build_id} expansion
+_CONFIG_DEFAULTS = {
+    "ATLAS_ORGANIZATION"    : "MongoDB",
+    "DB_USERNAME"           : "atlasuser",
+    "DB_PASSWORD"           : "mypassword123"
+}
+
+
+CONFIG_DEFAULTS = JSONObject(_CONFIG_DEFAULTS)
+
+
+_CONFIG_ENVVARS = {
+    "PROJECT_NAME"      : "EVERGREEN_PROJECT_ID",   # ${project} in EVG
+    "CLUSTER_NAME_SALT" : "EVERGREEN_BUILD_ID"      # ${build_id} in EVG
+}
+
+
+CONFIG_ENVVARS  = JSONObject(_CONFIG_ENVVARS)
 
 
 # Convenience class for storing settings related to polling.
